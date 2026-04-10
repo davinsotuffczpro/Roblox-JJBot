@@ -2,8 +2,7 @@
 --  JumpingJackBot.lua
 --  Loadstring compatible — works in any Roblox game via executor
 --
---  loadstring(game:HttpGet("https://raw.githubusercontent.com/
---      YOUR_USERNAME/YOUR_REPO/main/JumpingJackBot.lua"))()
+--  loadstring(game:HttpGet("https://raw.githubusercontent.com/davinsotuffczpro/Roblox-JJBot/main/jjbot.lua"))()
 -- ============================================================
 
 -- ── Safety: prevent duplicate GUIs ───────────────────────────
