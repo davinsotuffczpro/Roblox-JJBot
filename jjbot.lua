@@ -1,27 +1,38 @@
 -- ============================================================
 --  JumpingJackBot.lua
---  LocalScript → StarterPlayerScripts
+--  Loadstring compatible — works in any Roblox game via executor
 --
---  Builds a ScreenGui inside the player's PlayerGui.
---  The GUI controls (mode, count, delay, start/stop) all
---  stay on-screen in Roblox. Pressing Start sends each word
---  to Roblox chat one at a time using SayMessageRequest.
+--  loadstring(game:HttpGet("https://raw.githubusercontent.com/
+--      YOUR_USERNAME/YOUR_REPO/main/JumpingJackBot.lua"))()
 -- ============================================================
 
-local Players            = game:GetService("Players")
-local TweenService       = game:GetService("TweenService")
-local ReplicatedStorage  = game:GetService("ReplicatedStorage")
-local localPlayer        = Players.LocalPlayer
-local playerGui          = localPlayer:WaitForChild("PlayerGui")
+-- ── Safety: prevent duplicate GUIs ───────────────────────────
+local existingGui = game:GetService("CoreGui"):FindFirstChild("JumpingJackBot")
+    or game:GetService("Players").LocalPlayer
+        :FindFirstChild("PlayerGui")
+        and game:GetService("Players").LocalPlayer.PlayerGui:FindFirstChild("JumpingJackBot")
 
--- ── Number-to-words ─────────────────────────────────────────
+if existingGui then existingGui:Destroy() end
 
+-- ── Services ──────────────────────────────────────────────────
+local Players       = game:GetService("Players")
+local TweenService  = game:GetService("TweenService")
+local RunService    = game:GetService("RunService")
+local localPlayer   = Players.LocalPlayer
+
+-- Executors run as LocalScripts so PlayerGui is accessible,
+-- but parenting to CoreGui is more reliable across games.
+local guiParent = (syn and syn.protect_gui and game:GetService("CoreGui"))
+    or (gethui and gethui())
+    or (game:GetService("CoreGui"))
+
+-- ── Number-to-words ───────────────────────────────────────────
 local ONES = {
-    [0]="", [1]="One",  [2]="Two",    [3]="Three", [4]="Four",
-    [5]="Five", [6]="Six", [7]="Seven", [8]="Eight", [9]="Nine",
-    [10]="Ten", [11]="Eleven", [12]="Twelve", [13]="Thirteen",
-    [14]="Fourteen", [15]="Fifteen",  [16]="Sixteen",
-    [17]="Seventeen", [18]="Eighteen", [19]="Nineteen",
+    [0]="",      [1]="One",      [2]="Two",       [3]="Three",
+    [4]="Four",  [5]="Five",     [6]="Six",        [7]="Seven",
+    [8]="Eight", [9]="Nine",     [10]="Ten",       [11]="Eleven",
+    [12]="Twelve",[13]="Thirteen",[14]="Fourteen", [15]="Fifteen",
+    [16]="Sixteen",[17]="Seventeen",[18]="Eighteen",[19]="Nineteen",
 }
 local TENS = {
     [2]="Twenty",[3]="Thirty",[4]="Forty",[5]="Fifty",
@@ -42,8 +53,7 @@ local function toWords(n)
     return r:match("^%s*(.-)%s*$")
 end
 
--- ── Sequence builders ────────────────────────────────────────
-
+-- ── Sequence builders ─────────────────────────────────────────
 local function buildHell(count)
     local seq = {}
     for i = 1, count do
@@ -66,42 +76,45 @@ local function buildJJ(count)
     return seq
 end
 
--- ── Chat sender ──────────────────────────────────────────────
-
-local chatEvent
-local function getSayEvent()
-    if chatEvent then return chatEvent end
-    local ok, ev = pcall(function()
-        return ReplicatedStorage
-            :WaitForChild("DefaultChatSystemChatEvents", 3)
-            :WaitForChild("SayMessageRequest", 3)
-    end)
-    if ok and ev then chatEvent = ev end
-    return chatEvent
-end
-
+-- ── Chat sender ───────────────────────────────────────────────
+-- Tries multiple methods so it works across different games
+-- and chat system versions.
 local function sendChat(msg)
-    local ev = getSayEvent()
-    if ev then
-        pcall(function() ev:FireServer(msg, "All") end)
-    else
-        -- fallback for non-default chat systems
-        pcall(function()
-            game:GetService("Chat"):Chat(
-                localPlayer.Character and localPlayer.Character:FindFirstChild("Head"),
-                msg, Enum.ChatColor.White
-            )
-        end)
-    end
+    -- Method 1: Default Roblox chat (most games)
+    local ok = pcall(function()
+        game:GetService("ReplicatedStorage")
+            :WaitForChild("DefaultChatSystemChatEvents", 2)
+            :WaitForChild("SayMessageRequest", 2)
+            :FireServer(msg, "All")
+    end)
+    if ok then return end
+
+    -- Method 2: TextChatService (newer games using the new chat)
+    ok = pcall(function()
+        local tcs = game:GetService("TextChatService")
+        local channel = tcs:FindFirstChild("TextChannels")
+            and tcs.TextChannels:FindFirstChild("RBXGeneral")
+        if channel then
+            channel:SendAsync(msg)
+        end
+    end)
+    if ok then return end
+
+    -- Method 3: Legacy Chat service bubble
+    pcall(function()
+        local head = localPlayer.Character
+            and localPlayer.Character:FindFirstChild("Head")
+        if head then
+            game:GetService("Chat"):Chat(head, msg, Enum.ChatColor.White)
+        end
+    end)
 end
 
--- ── Bot state ────────────────────────────────────────────────
-
+-- ── Bot state ─────────────────────────────────────────────────
 local running    = false
 local stopSignal = false
 
--- ── GUI builder ──────────────────────────────────────────────
-
+-- ── Colours ───────────────────────────────────────────────────
 local BG      = Color3.fromRGB(10,  10,  15)
 local SURFACE = Color3.fromRGB(17,  17,  24)
 local SURF2   = Color3.fromRGB(24,  24,  31)
@@ -112,204 +125,190 @@ local SUCCESS = Color3.fromRGB(0,   255, 153)
 local DANGER  = Color3.fromRGB(255, 79,  123)
 local WHITE   = Color3.fromRGB(232, 232, 240)
 
-local function makeBorder(parent, color)
-    local f = Instance.new("UIStroke")
-    f.Color = color or BORDER
-    f.Thickness = 1
-    f.Parent = parent
-    return f
-end
-
-local function makeCorner(parent, radius)
+-- ── GUI helpers ───────────────────────────────────────────────
+local function makeCorner(parent, r)
     local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, radius or 6)
+    c.CornerRadius = UDim.new(0, r or 6)
     c.Parent = parent
     return c
 end
 
-local function makeLabel(parent, text, size, color, bold, xAlign)
-    local l = Instance.new("TextLabel")
-    l.BackgroundTransparency = 1
-    l.Text = text
-    l.TextColor3 = color or WHITE
-    l.TextSize = size or 14
-    l.Font = bold and Enum.Font.GothamBold or Enum.Font.GothamMedium
-    l.TextXAlignment = xAlign or Enum.TextXAlignment.Left
-    l.Size = UDim2.new(1, 0, 0, size and size + 6 or 20)
+local function makeStroke(parent, color, thick)
+    local s = Instance.new("UIStroke")
+    s.Color = color or BORDER
+    s.Thickness = thick or 1
+    s.Parent = parent
+    return s
+end
+
+local function makePad(parent, l, r, t, b)
+    local p = Instance.new("UIPadding")
+    p.PaddingLeft   = UDim.new(0, l or 0)
+    p.PaddingRight  = UDim.new(0, r or 0)
+    p.PaddingTop    = UDim.new(0, t or 0)
+    p.PaddingBottom = UDim.new(0, b or 0)
+    p.Parent = parent
+    return p
+end
+
+local function makeList(parent, dir, padding, hAlign, vAlign)
+    local l = Instance.new("UIListLayout")
+    l.FillDirection        = dir or Enum.FillDirection.Vertical
+    l.SortOrder            = Enum.SortOrder.LayoutOrder
+    l.Padding               = UDim.new(0, padding or 0)
+    l.HorizontalAlignment   = hAlign or Enum.HorizontalAlignment.Left
+    l.VerticalAlignment     = vAlign or Enum.VerticalAlignment.Top
     l.Parent = parent
     return l
 end
 
-local function makeButton(parent, text, bgColor, textColor)
-    local b = Instance.new("TextButton")
-    b.BackgroundColor3 = bgColor or SURF2
-    b.TextColor3 = textColor or WHITE
-    b.Text = text
-    b.TextSize = 13
-    b.Font = Enum.Font.GothamBold
-    b.AutoButtonColor = false
-    b.Size = UDim2.new(0.48, 0, 0, 36)
-    makeCorner(b, 6)
-    makeBorder(b, bgColor or BORDER)
-    b.Parent = parent
-
-    b.MouseEnter:Connect(function()
-        TweenService:Create(b, TweenInfo.new(0.12), {BackgroundTransparency = 0.7}):Play()
-    end)
-    b.MouseLeave:Connect(function()
-        TweenService:Create(b, TweenInfo.new(0.12), {BackgroundTransparency = 0.85}):Play()
-    end)
-    b.BackgroundTransparency = 0.85
-    return b
-end
-
-local function makeInput(parent, placeholder, default)
-    local box = Instance.new("TextBox")
-    box.BackgroundColor3 = SURF2
-    box.BackgroundTransparency = 0
-    box.TextColor3 = WHITE
-    box.PlaceholderText = placeholder or ""
-    box.PlaceholderColor3 = MUTED
-    box.Text = default or ""
-    box.TextSize = 14
-    box.Font = Enum.Font.GothamMedium
-    box.ClearTextOnFocus = false
-    box.Size = UDim2.new(1, 0, 0, 32)
-    makeCorner(box, 6)
-    makeBorder(box, BORDER)
-    box.Parent = parent
-
-    box.Focused:Connect(function()
-        TweenService:Create(box:FindFirstChildOfClass("UIStroke"), TweenInfo.new(0.12), {Color = ACCENT}):Play()
-    end)
-    box.FocusLost:Connect(function()
-        TweenService:Create(box:FindFirstChildOfClass("UIStroke"), TweenInfo.new(0.12), {Color = BORDER}):Play()
-    end)
-
-    -- inner padding
-    local pad = Instance.new("UIPadding")
-    pad.PaddingLeft = UDim.new(0, 10)
-    pad.Parent = box
-    return box
-end
-
--- ── Build the ScreenGui ───────────────────────────────────────
-
+-- ── Build ScreenGui ───────────────────────────────────────────
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "JumpingJackBot"
-screenGui.ResetOnSpawn = false
-screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-screenGui.Parent = playerGui
+screenGui.Name             = "JumpingJackBot"
+screenGui.ResetOnSpawn     = false
+screenGui.ZIndexBehavior   = Enum.ZIndexBehavior.Sibling
+screenGui.DisplayOrder     = 999
+-- protect_gui for Synapse/other executors
+if syn and syn.protect_gui then syn.protect_gui(screenGui) end
+screenGui.Parent = guiParent
 
--- Main frame
+-- Outer frame
 local main = Instance.new("Frame")
-main.Name = "Main"
-main.Size = UDim2.new(0, 320, 0, 0)  -- height set by layout
-main.Position = UDim2.new(0, 16, 0.5, -200)
-main.BackgroundColor3 = BG
-main.AnchorPoint = Vector2.new(0, 0.5)
+main.Name               = "Main"
+main.Size               = UDim2.new(0, 310, 0, 420)
+main.Position           = UDim2.new(0, 16, 0.5, -210)
+main.BackgroundColor3   = BG
+main.BorderSizePixel    = 0
 makeCorner(main, 10)
-makeBorder(main, BORDER)
+makeStroke(main, BORDER)
+makePad(main, 14, 14, 12, 14)
+makeList(main, Enum.FillDirection.Vertical, 0)
 main.Parent = screenGui
 
-local mainLayout = Instance.new("UIListLayout")
-mainLayout.SortOrder = Enum.SortOrder.LayoutOrder
-mainLayout.Padding = UDim.new(0, 0)
-mainLayout.Parent = main
-
-local mainPad = Instance.new("UIPadding")
-mainPad.PaddingLeft   = UDim.new(0, 14)
-mainPad.PaddingRight  = UDim.new(0, 14)
-mainPad.PaddingTop    = UDim.new(0, 14)
-mainPad.PaddingBottom = UDim.new(0, 14)
-mainPad.Parent = main
-
--- Auto-resize main frame height
-local function updateHeight()
-    task.wait()
-    main.Size = UDim2.new(0, 320, 0, mainLayout.AbsoluteContentSize.Y + 28)
+-- ── Drag to move ─────────────────────────────────────────────
+do
+    local dragging, dragStart, startPos
+    main.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragStart = input.Position
+            startPos  = main.Position
+        end
+    end)
+    main.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    game:GetService("UserInputService").InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            main.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
 end
 
--- ── Title ────────────────────────────────────────────────────
+-- ── Title bar ─────────────────────────────────────────────────
+local titleBar = Instance.new("Frame")
+titleBar.BackgroundTransparency = 1
+titleBar.Size = UDim2.new(1, 0, 0, 28)
+titleBar.LayoutOrder = 1
+makeList(titleBar, Enum.FillDirection.Horizontal, 0,
+    Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+titleBar.Parent = main
 
 local titleLabel = Instance.new("TextLabel")
 titleLabel.BackgroundTransparency = 1
 titleLabel.Text = "JUMPING JACK BOT"
 titleLabel.TextColor3 = ACCENT
-titleLabel.TextSize = 15
+titleLabel.TextSize = 14
 titleLabel.Font = Enum.Font.GothamBold
 titleLabel.TextXAlignment = Enum.TextXAlignment.Center
-titleLabel.Size = UDim2.new(1, 0, 0, 28)
-titleLabel.LayoutOrder = 1
-titleLabel.Parent = main
+titleLabel.Size = UDim2.new(1, -30, 1, 0)
+titleLabel.Parent = titleBar
 
--- ── Section: Mode ────────────────────────────────────────────
+-- Close button
+local closeBtn = Instance.new("TextButton")
+closeBtn.BackgroundTransparency = 1
+closeBtn.Text = "✕"
+closeBtn.TextColor3 = MUTED
+closeBtn.TextSize = 14
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.Size = UDim2.new(0, 28, 1, 0)
+closeBtn.Parent = titleBar
+closeBtn.MouseButton1Click:Connect(function() screenGui:Destroy() end)
 
-local modeSection = Instance.new("Frame")
-modeSection.BackgroundTransparency = 1
-modeSection.Size = UDim2.new(1, 0, 0, 90)
-modeSection.LayoutOrder = 2
-modeSection.Parent = main
+-- ── Divider helper ────────────────────────────────────────────
+local function divider(order)
+    local d = Instance.new("Frame")
+    d.BackgroundColor3 = BORDER
+    d.BorderSizePixel  = 0
+    d.Size = UDim2.new(1, 0, 0, 1)
+    d.LayoutOrder = order
+    d.Parent = main
+    return d
+end
 
-local modeSectionLayout = Instance.new("UIListLayout")
-modeSectionLayout.SortOrder = Enum.SortOrder.LayoutOrder
-modeSectionLayout.Padding = UDim.new(0, 6)
-modeSectionLayout.Parent = modeSection
+-- ── Section label helper ──────────────────────────────────────
+local function sectionLabel(text, order)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Text = text
+    l.TextColor3 = MUTED
+    l.TextSize = 10
+    l.Font = Enum.Font.GothamBold
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Size = UDim2.new(1, 0, 0, 18)
+    l.LayoutOrder = order
+    l.Parent = main
+    return l
+end
 
-local sectionDivider = Instance.new("Frame")
-sectionDivider.BackgroundColor3 = BORDER
-sectionDivider.Size = UDim2.new(1, 0, 0, 1)
-sectionDivider.LayoutOrder = 1
-sectionDivider.Parent = modeSection
+-- ── Mode buttons ──────────────────────────────────────────────
+divider(2)
+sectionLabel("MODE", 3)
 
-local modeLabel = makeLabel(modeSection, "MODE", 10, MUTED, true)
-modeLabel.LayoutOrder = 2
-modeLabel.TextSize = 10
-modeLabel.Size = UDim2.new(1, 0, 0, 16)
+local modeFrame = Instance.new("Frame")
+modeFrame.BackgroundTransparency = 1
+modeFrame.Size = UDim2.new(1, 0, 0, 52)
+modeFrame.LayoutOrder = 4
+makeList(modeFrame, Enum.FillDirection.Horizontal, 5,
+    Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+modeFrame.Parent = main
 
-local modeRow = Instance.new("Frame")
-modeRow.BackgroundTransparency = 1
-modeRow.Size = UDim2.new(1, 0, 0, 56)
-modeRow.LayoutOrder = 3
-modeRow.Parent = modeSection
-
-local modeRowLayout = Instance.new("UIListLayout")
-modeRowLayout.FillDirection = Enum.FillDirection.Horizontal
-modeRowLayout.SortOrder = Enum.SortOrder.LayoutOrder
-modeRowLayout.Padding = UDim.new(0, 6)
-modeRowLayout.Parent = modeRow
-
-local modes = {
-    { id = "hell",    label = "Hell Jacks",    sub = "O→N→E→ONE→..." },
-    { id = "grammar", label = "Grammar Jacks", sub = "One.→Two.→..." },
-    { id = "jj",      label = "Jumping Jacks", sub = "ONE→TWO→..."   },
+local MODES = {
+    { id="hell",    label="Hell Jacks",    sub="O→N→E→ONE" },
+    { id="grammar", label="Grammar Jacks", sub="One.→Two."  },
+    { id="jj",      label="Jump Jacks",    sub="ONE→TWO"    },
 }
 
-local selectedMode   = "hell"
-local modeButtons    = {}
+local selectedMode = "hell"
+local modeBtns = {}
 
-for i, m in ipairs(modes) do
+for i, m in ipairs(MODES) do
     local btn = Instance.new("TextButton")
     btn.Name = m.id
-    btn.Size = UDim2.new(0, 92, 0, 50)
+    btn.Size = UDim2.new(0, 91, 0, 48)
     btn.BackgroundColor3 = SURF2
-    btn.BackgroundTransparency = 0.4
-    btn.TextColor3 = MUTED
+    btn.BackgroundTransparency = 0.3
     btn.Text = ""
     btn.AutoButtonColor = false
     btn.LayoutOrder = i
     makeCorner(btn, 6)
-    local stroke = makeBorder(btn, BORDER)
+    local stroke = makeStroke(btn, BORDER)
 
     local inner = Instance.new("Frame")
     inner.BackgroundTransparency = 1
     inner.Size = UDim2.new(1, 0, 1, 0)
     inner.Parent = btn
-    local innerLayout = Instance.new("UIListLayout")
-    innerLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-    innerLayout.VerticalAlignment   = Enum.VerticalAlignment.Center
-    innerLayout.Padding = UDim.new(0, 2)
-    innerLayout.Parent = inner
+    makeList(inner, Enum.FillDirection.Vertical, 2,
+        Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
 
     local topL = Instance.new("TextLabel")
     topL.BackgroundTransparency = 1
@@ -331,145 +330,104 @@ for i, m in ipairs(modes) do
     subL.Size = UDim2.new(1, 0, 0, 12)
     subL.Parent = inner
 
-    modeButtons[m.id] = { btn = btn, stroke = stroke, topL = topL, subL = subL }
-    btn.Parent = modeRow
+    modeBtns[m.id] = { btn=btn, stroke=stroke, topL=topL, subL=subL }
+    btn.Parent = modeFrame
 end
 
 local function setMode(id)
     selectedMode = id
-    for mid, obj in pairs(modeButtons) do
+    for mid, obj in pairs(modeBtns) do
         if mid == id then
-            TweenService:Create(obj.btn, TweenInfo.new(0.15), {BackgroundTransparency = 0.85, BackgroundColor3 = ACCENT}):Play()
-            TweenService:Create(obj.stroke, TweenInfo.new(0.15), {Color = ACCENT}):Play()
+            obj.btn.BackgroundTransparency = 0.85
+            obj.btn.BackgroundColor3 = ACCENT
+            obj.stroke.Color = ACCENT
             obj.topL.TextColor3 = ACCENT
             obj.subL.TextColor3 = Color3.fromRGB(0, 180, 160)
         else
-            TweenService:Create(obj.btn, TweenInfo.new(0.15), {BackgroundTransparency = 0.4, BackgroundColor3 = SURF2}):Play()
-            TweenService:Create(obj.stroke, TweenInfo.new(0.15), {Color = BORDER}):Play()
+            obj.btn.BackgroundTransparency = 0.3
+            obj.btn.BackgroundColor3 = SURF2
+            obj.stroke.Color = BORDER
             obj.topL.TextColor3 = MUTED
             obj.subL.TextColor3 = MUTED
         end
     end
 end
 
-for _, m in ipairs(modes) do
-    modeButtons[m.id].btn.MouseButton1Click:Connect(function()
+for _, m in ipairs(MODES) do
+    modeBtns[m.id].btn.MouseButton1Click:Connect(function()
         if not running then setMode(m.id) end
     end)
 end
 
 setMode("hell")
 
--- ── Section: Settings ────────────────────────────────────────
+-- ── Settings inputs ───────────────────────────────────────────
+divider(5)
+sectionLabel("SETTINGS", 6)
 
-local settingsSection = Instance.new("Frame")
-settingsSection.BackgroundTransparency = 1
-settingsSection.Size = UDim2.new(1, 0, 0, 110)
-settingsSection.LayoutOrder = 3
-settingsSection.Parent = main
+local function inputRow(labelText, placeholder, default, order)
+    local row = Instance.new("Frame")
+    row.BackgroundTransparency = 1
+    row.Size = UDim2.new(1, 0, 0, 32)
+    row.LayoutOrder = order
+    makeList(row, Enum.FillDirection.Horizontal, 8,
+        Enum.HorizontalAlignment.Left, Enum.VerticalAlignment.Center)
+    row.Parent = main
 
-local settingsLayout = Instance.new("UIListLayout")
-settingsLayout.SortOrder = Enum.SortOrder.LayoutOrder
-settingsLayout.Padding = UDim.new(0, 6)
-settingsLayout.Parent = settingsSection
+    local lbl = Instance.new("TextLabel")
+    lbl.BackgroundTransparency = 1
+    lbl.Text = labelText
+    lbl.TextColor3 = MUTED
+    lbl.TextSize = 13
+    lbl.Font = Enum.Font.GothamMedium
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Size = UDim2.new(0, 60, 1, 0)
+    lbl.Parent = row
 
-local div2 = Instance.new("Frame")
-div2.BackgroundColor3 = BORDER
-div2.Size = UDim2.new(1, 0, 0, 1)
-div2.LayoutOrder = 1
-div2.Parent = settingsSection
+    local box = Instance.new("TextBox")
+    box.BackgroundColor3 = SURF2
+    box.BackgroundTransparency = 0
+    box.TextColor3 = WHITE
+    box.PlaceholderText = placeholder or ""
+    box.PlaceholderColor3 = MUTED
+    box.Text = default or ""
+    box.TextSize = 13
+    box.Font = Enum.Font.GothamMedium
+    box.ClearTextOnFocus = false
+    box.Size = UDim2.new(1, -68, 1, 0)
+    makeCorner(box, 6)
+    local boxStroke = makeStroke(box, BORDER)
+    makePad(box, 10, 0, 0, 0)
+    box.Parent = row
 
-local settingsLabel = makeLabel(settingsSection, "SETTINGS", 10, MUTED, true)
-settingsLabel.LayoutOrder = 2
-settingsLabel.TextSize = 10
-settingsLabel.Size = UDim2.new(1, 0, 0, 16)
+    box.Focused:Connect(function()
+        boxStroke.Color = ACCENT
+    end)
+    box.FocusLost:Connect(function()
+        boxStroke.Color = BORDER
+    end)
 
--- Count row
-local countRow = Instance.new("Frame")
-countRow.BackgroundTransparency = 1
-countRow.Size = UDim2.new(1, 0, 0, 32)
-countRow.LayoutOrder = 3
-countRow.Parent = settingsSection
-local countRowL = Instance.new("UIListLayout")
-countRowL.FillDirection = Enum.FillDirection.Horizontal
-countRowL.VerticalAlignment = Enum.VerticalAlignment.Center
-countRowL.Padding = UDim.new(0, 8)
-countRowL.Parent = countRow
-local countLbl = Instance.new("TextLabel")
-countLbl.BackgroundTransparency = 1
-countLbl.Text = "Count"
-countLbl.TextColor3 = MUTED
-countLbl.TextSize = 13
-countLbl.Font = Enum.Font.GothamMedium
-countLbl.Size = UDim2.new(0, 55, 1, 0)
-countLbl.TextXAlignment = Enum.TextXAlignment.Left
-countLbl.Parent = countRow
-local countWrap = Instance.new("Frame")
-countWrap.BackgroundTransparency = 1
-countWrap.Size = UDim2.new(1, -63, 1, 0)
-countWrap.Parent = countRow
-local countInput = makeInput(countWrap, "e.g. 10", "10")
-countInput.Size = UDim2.new(1, 0, 0, 32)
+    return box
+end
 
--- Delay row
-local delayRow = Instance.new("Frame")
-delayRow.BackgroundTransparency = 1
-delayRow.Size = UDim2.new(1, 0, 0, 32)
-delayRow.LayoutOrder = 4
-delayRow.Parent = settingsSection
-local delayRowL = Instance.new("UIListLayout")
-delayRowL.FillDirection = Enum.FillDirection.Horizontal
-delayRowL.VerticalAlignment = Enum.VerticalAlignment.Center
-delayRowL.Padding = UDim.new(0, 8)
-delayRowL.Parent = delayRow
-local delayLbl = Instance.new("TextLabel")
-delayLbl.BackgroundTransparency = 1
-delayLbl.Text = "Delay ms"
-delayLbl.TextColor3 = MUTED
-delayLbl.TextSize = 13
-delayLbl.Font = Enum.Font.GothamMedium
-delayLbl.Size = UDim2.new(0, 55, 1, 0)
-delayLbl.TextXAlignment = Enum.TextXAlignment.Left
-delayLbl.Parent = delayRow
-local delayWrap = Instance.new("Frame")
-delayWrap.BackgroundTransparency = 1
-delayWrap.Size = UDim2.new(1, -63, 1, 0)
-delayWrap.Parent = delayRow
-local delayInput = makeInput(delayWrap, "0–5000 ms", "500")
-delayInput.Size = UDim2.new(1, 0, 0, 32)
+local countInput = inputRow("Count",    "e.g. 10",    "10",  7)
+local delayInput = inputRow("Delay ms", "0 – 5000",   "500", 8)
 
--- ── Section: Preview + buttons ───────────────────────────────
+-- ── Preview box ───────────────────────────────────────────────
+divider(9)
+sectionLabel("PREVIEW", 10)
 
-local previewSection = Instance.new("Frame")
-previewSection.BackgroundTransparency = 1
-previewSection.Size = UDim2.new(1, 0, 0, 130)
-previewSection.LayoutOrder = 4
-previewSection.Parent = main
+local previewOuter = Instance.new("Frame")
+previewOuter.BackgroundColor3 = SURF2
+previewOuter.BorderSizePixel  = 0
+previewOuter.Size = UDim2.new(1, 0, 0, 54)
+previewOuter.LayoutOrder = 11
+makeCorner(previewOuter, 6)
+makeStroke(previewOuter, BORDER)
+previewOuter.Parent = main
 
-local previewLayout = Instance.new("UIListLayout")
-previewLayout.SortOrder = Enum.SortOrder.LayoutOrder
-previewLayout.Padding = UDim.new(0, 8)
-previewLayout.Parent = previewSection
-
-local div3 = Instance.new("Frame")
-div3.BackgroundColor3 = BORDER
-div3.Size = UDim2.new(1, 0, 0, 1)
-div3.LayoutOrder = 1
-div3.Parent = previewSection
-
--- Preview box
-local previewBox = Instance.new("Frame")
-previewBox.BackgroundColor3 = SURF2
-previewBox.Size = UDim2.new(1, 0, 0, 52)
-previewBox.LayoutOrder = 2
-makeCorner(previewBox, 6)
-makeBorder(previewBox, BORDER)
-previewBox.Parent = previewSection
-
-local previewInnerLayout = Instance.new("UIListLayout")
-previewInnerLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-previewInnerLayout.VerticalAlignment   = Enum.VerticalAlignment.Center
-previewInnerLayout.Parent = previewBox
+makeList(previewOuter, Enum.FillDirection.Vertical, 0,
+    Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
 
 local previewWord = Instance.new("TextLabel")
 previewWord.BackgroundTransparency = 1
@@ -478,8 +436,8 @@ previewWord.TextColor3 = ACCENT
 previewWord.TextSize = 22
 previewWord.Font = Enum.Font.GothamBold
 previewWord.TextXAlignment = Enum.TextXAlignment.Center
-previewWord.Size = UDim2.new(1, 0, 0, 28)
-previewWord.Parent = previewBox
+previewWord.Size = UDim2.new(1, 0, 0, 30)
+previewWord.Parent = previewOuter
 
 local statusLabel = Instance.new("TextLabel")
 statusLabel.BackgroundTransparency = 1
@@ -488,68 +446,70 @@ statusLabel.TextColor3 = MUTED
 statusLabel.TextSize = 11
 statusLabel.Font = Enum.Font.GothamMedium
 statusLabel.TextXAlignment = Enum.TextXAlignment.Center
-statusLabel.Size = UDim2.new(1, 0, 0, 14)
-statusLabel.Parent = previewBox
+statusLabel.Size = UDim2.new(1, 0, 0, 16)
+statusLabel.Parent = previewOuter
 
 -- Progress bar
-local progressBg = Instance.new("Frame")
-progressBg.BackgroundColor3 = SURF2
-progressBg.Size = UDim2.new(1, 0, 0, 4)
-progressBg.LayoutOrder = 3
-makeCorner(progressBg, 2)
-progressBg.Parent = previewSection
+local progBg = Instance.new("Frame")
+progBg.BackgroundColor3 = SURF2
+progBg.BorderSizePixel  = 0
+progBg.Size = UDim2.new(1, 0, 0, 4)
+progBg.LayoutOrder = 12
+makeCorner(progBg, 2)
+makeStroke(progBg, BORDER)
+progBg.Parent = main
 
-local progressFill = Instance.new("Frame")
-progressFill.BackgroundColor3 = ACCENT
-progressFill.Size = UDim2.new(0, 0, 1, 0)
-progressFill.AnchorPoint = Vector2.new(0, 0)
-makeCorner(progressFill, 2)
-progressFill.Parent = progressBg
+local progFill = Instance.new("Frame")
+progFill.BackgroundColor3 = ACCENT
+progFill.BorderSizePixel  = 0
+progFill.Size = UDim2.new(0, 0, 1, 0)
+makeCorner(progFill, 2)
+progFill.Parent = progBg
 
--- Start / Stop buttons
-local btnRow = Instance.new("Frame")
-btnRow.BackgroundTransparency = 1
-btnRow.Size = UDim2.new(1, 0, 0, 36)
-btnRow.LayoutOrder = 4
-btnRow.Parent = previewSection
+-- ── Start / Stop buttons ──────────────────────────────────────
+local btnFrame = Instance.new("Frame")
+btnFrame.BackgroundTransparency = 1
+btnFrame.Size = UDim2.new(1, 0, 0, 36)
+btnFrame.LayoutOrder = 13
+makeList(btnFrame, Enum.FillDirection.Horizontal, 8,
+    Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+btnFrame.Parent = main
 
-local btnRowLayout = Instance.new("UIListLayout")
-btnRowLayout.FillDirection = Enum.FillDirection.Horizontal
-btnRowLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-btnRowLayout.Padding = UDim.new(0, 8)
-btnRowLayout.Parent = btnRow
-
-local startBtn = makeButton(btnRow, "▶  START", SUCCESS, SUCCESS)
-local stopBtn  = makeButton(btnRow, "■  STOP",  DANGER,  DANGER)
-stopBtn.Active = false
-TweenService:Create(stopBtn, TweenInfo.new(0), {BackgroundTransparency = 0.85}):Play()
-
--- ── Wire up Start / Stop ──────────────────────────────────────
-
-local function setStatus(msg)
-    statusLabel.Text = msg
+local function actionBtn(text, color)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, 136, 0, 34)
+    b.BackgroundColor3 = color
+    b.BackgroundTransparency = 0.85
+    b.TextColor3 = color
+    b.Text = text
+    b.TextSize = 13
+    b.Font = Enum.Font.GothamBold
+    b.AutoButtonColor = false
+    makeCorner(b, 6)
+    makeStroke(b, color)
+    b.Parent = btnFrame
+    b.MouseEnter:Connect(function()
+        TweenService:Create(b, TweenInfo.new(0.12), {BackgroundTransparency=0.7}):Play()
+    end)
+    b.MouseLeave:Connect(function()
+        TweenService:Create(b, TweenInfo.new(0.12), {BackgroundTransparency=0.85}):Play()
+    end)
+    return b
 end
 
-local function setPreview(word)
-    previewWord.Text = word
-    TweenService:Create(previewWord, TweenInfo.new(0.05), {TextTransparency = 0}):Play()
-end
+local startBtn = actionBtn("▶  START", SUCCESS)
+local stopBtn  = actionBtn("■  STOP",  DANGER)
 
-local function setProgress(fraction)
-    TweenService:Create(progressFill, TweenInfo.new(0.15), {
-        Size = UDim2.new(math.clamp(fraction, 0, 1), 0, 1, 0)
-    }):Play()
+-- ── Logic ─────────────────────────────────────────────────────
+local function setProgress(f)
+    progFill.Size = UDim2.new(math.clamp(f, 0, 1), 0, 1, 0)
 end
 
 local function setBusy(busy)
     startBtn.Active = not busy
     stopBtn.Active  = busy
     startBtn.TextColor3 = busy and MUTED or SUCCESS
-    stopBtn.TextColor3  = busy and DANGER or MUTED
-    -- dim mode buttons while running
-    for _, obj in pairs(modeButtons) do
-        obj.btn.Active = not busy
-    end
+    for _, s in pairs(modeBtns) do s.btn.Active = not busy end
 end
 
 startBtn.MouseButton1Click:Connect(function()
@@ -559,50 +519,51 @@ startBtn.MouseButton1Click:Connect(function()
     local delay = tonumber(delayInput.Text)
 
     if not count or count < 1 then
-        setStatus("Count must be ≥ 1")
+        statusLabel.Text = "Count must be ≥ 1"
         return
     end
     if not delay or delay < 0 or delay > 5000 then
-        setStatus("Delay must be 0–5000 ms")
+        statusLabel.Text = "Delay must be 0–5000ms"
         return
     end
 
-    local sequence
+    local seq
     if selectedMode == "hell" then
-        sequence = buildHell(count)
+        seq = buildHell(math.floor(count))
     elseif selectedMode == "grammar" then
-        sequence = buildGrammar(count)
+        seq = buildGrammar(math.floor(count))
     else
-        sequence = buildJJ(count)
+        seq = buildJJ(math.floor(count))
     end
 
-    local total = #sequence
+    local total = #seq
 
     task.spawn(function()
         running    = true
         stopSignal = false
         setBusy(true)
         setProgress(0)
-        setPreview("—")
+        previewWord.Text = "—"
 
         local delaySec = math.max(delay / 1000, 0.04)
 
-        for i, word in ipairs(sequence) do
+        for i, word in ipairs(seq) do
             if stopSignal then break end
-
-            setPreview(word)
-            setStatus(word .. "  (" .. i .. " / " .. total .. ")")
+            previewWord.Text  = word
+            statusLabel.Text  = word .. "  (" .. i .. " / " .. total .. ")"
             setProgress(i / total)
             sendChat(word)
-
             task.wait(delaySec)
         end
 
         if not stopSignal then
-            setStatus("Done — " .. (selectedMode == "hell" and count .. " hell jack(s)" or "counted to " .. sequence[#sequence]))
+            local last = seq[#seq]
+            statusLabel.Text = "Done — " .. (selectedMode=="hell"
+                and math.floor(count).." hell jack(s)"
+                or "counted to "..last)
             setProgress(1)
         else
-            setStatus("Stopped")
+            statusLabel.Text = "Stopped"
         end
 
         running    = false
@@ -612,9 +573,5 @@ startBtn.MouseButton1Click:Connect(function()
 end)
 
 stopBtn.MouseButton1Click:Connect(function()
-    if running then
-        stopSignal = true
-    end
+    if running then stopSignal = true end
 end)
-
-updateHeight()
